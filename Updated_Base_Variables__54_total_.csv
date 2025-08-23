@@ -1,0 +1,55 @@
+Variable,Source System,Description
+cust_id,LOS,Unique identifier for customer
+age,LOS,Customer age in years
+gender,LOS,Gender of the customer
+marital_status,LOS,Marital status of the customer
+education_level,LOS,Education qualification of the customer
+employment_type,LOS,Employment status of the customer
+monthly_income,LOS,Reported monthly income
+residence_type,LOS,"Type of customers residence (Owned, Rented, etc.)"
+city,LOS,Customers city of residence
+state,LOS,Customers state of residence
+application_id,LOS,Loan application identifier
+application_date,LOS,Date of loan application
+product_type,LOS,Type of loan product applied for
+channel,LOS,"Application channel used (Branch, Online, etc.)"
+requested_amount,LOS,Loan amount requested
+tenure_months,LOS,Requested loan tenure in months
+account_id,CBS,Loan account identifier
+account_open_date,CBS,Date when the loan account was opened
+current_balance,CBS,Outstanding balance on the loan
+credit_limit,CBS,Credit card or credit limit
+emi_amount,CBS,Monthly EMI amount payable
+bureau_score,Credit Bureau,Credit score from bureau
+total_accounts,Credit Bureau,Total credit accounts reported by bureau
+active_accounts,Credit Bureau,Number of active accounts
+overdue_accounts,Credit Bureau,Number of accounts with overdue payments
+recent_enquiries_6m,Credit Bureau,Number of credit enquiries in last 6 months
+broken_ptp_flag,Collections,Indicates if customer broke Promise To Pay
+write_off_flag,Collections,Indicates if loan was written off
+legal_case_flag,Collections,Indicates if legal case is filed against customer
+ptp_kept_ratio,Collections,Ratio of kept vs. broken PTP commitments
+default_6m_flag,Derived,Indicates if customer defaulted in 6 months
+snapshot_date,System,Date of snapshot for this record
+credit_card_utilization_pct,Credit Bureau,Credit card utilization as percentage of limit
+past_due_accounts_count,Credit Bureau,Number of past due accounts
+recent_loan_inquiry_flag,Credit Bureau,Flag for recent loan enquiry
+repayment_to_due_ratio,Derived,Ratio of amount repaid to amount due
+early_repayment_flag,Derived,Flag if loan was repaid early
+dpd_m1,CBS (Transactions),Days Past Due in month 1
+dpd_m2,CBS (Transactions),Days Past Due in month 2
+dpd_m3,CBS (Transactions),Days Past Due in month 3
+dpd_m4,CBS (Transactions),Days Past Due in month 4
+dpd_m5,CBS (Transactions),Days Past Due in month 5
+dpd_m6,CBS (Transactions),Days Past Due in month 6
+dpd_m7,CBS (Transactions),Days Past Due in month 7
+dpd_m8,CBS (Transactions),Days Past Due in month 8
+dpd_m9,CBS (Transactions),Days Past Due in month 9
+dpd_m10,CBS (Transactions),Days Past Due in month 10
+dpd_m11,CBS (Transactions),Days Past Due in month 11
+dpd_m12,CBS (Transactions),Days Past Due in month 12
+average_balance,CBS,Average account balance over period
+minimum_balance,CBS,Minimum account balance over period
+salary_credits_3m,CBS,Number of salary credits in last 3 months
+emi_bounce_count,CBS,Number of EMI bounces in last 3 months
+account_tenure_months,CBS,Tenure of account in months (from system calculation)

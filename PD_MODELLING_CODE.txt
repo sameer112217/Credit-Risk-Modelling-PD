@@ -1,0 +1,2098 @@
+proc sql;
+    create table merged_data as
+    select a.*, b.dpd_30, b.dpd_60, c.worst_status, d.recovery_amount
+    from appl_header a
+    left join dpd_history b on a.account_number = b.account_number
+    left join bureau_summary c on a.cust_id = c.bureau_id
+    left join recovery_log d on a.account_number = d.loan_id;
+quit;
+
+
+libname sql_lib odbc dsn='SQLServerDSN' user=your_user password=your_pass;
+CSV File Example:
+
+proc import datafile='C:\data\loan_data.csv'
+  out=work.loan_data
+  dbms=csv
+  replace;
+  getnames=yes;
+run;
+
+Loading Flat Files (CSV)
+proc import datafile='/path/raw_dpd.csv'
+  out=raw_dpd
+  dbms=csv
+  replace;
+  getnames=yes;
+run;
+Extracting from Oracle via PROC SQL
+
+proc sql;
+  create table raw_dpd_history as
+  select *
+  from ora_lib.dpd_data
+  where extract_date between '01JAN2022'd and '31DEC2022'd;
+quit;
+
+data CREDIT.BUREAU_STAGE1_VARS;
+    set CREDIT.PD_RAW_VARIABLES;
+
+    /* Core Bureau Derived Variables */
+    bureau_score_flag           = (bureau_score < 650);
+    overdue_to_total_ratio      = overdue_accounts / total_accounts;
+    active_account_ratio        = active_accounts / total_accounts;
+    enquiries_flag              = (recent_enquiries_6m >= 3);
+
+    length risk_score_band $12;
+    if bureau_score < 600 then risk_score_band = 'Very Low';
+    else if bureau_score < 650 then risk_score_band = 'Low';
+    else if bureau_score < 700 then risk_score_band = 'Medium';
+    else if bureau_score < 750 then risk_score_band = 'High';
+    else risk_score_band = 'Very High';
+
+    high_enquiry_interaction    = (bureau_score < 650 and recent_enquiries_6m >= 3);
+    overdue_flag                = (overdue_accounts >= 2);
+    total_account_bucket        = cats('B', put(total_accounts, 1.));
+    low_risk_band_flag          = (risk_score_band in ('High', 'Very High'));
+    high_risk_band_flag         = (risk_score_band in ('Very Low', 'Low'));
+    bureau_score_bucket         = floor(bureau_score/50)*50;
+    score_enquiry_score         = bureau_score * recent_enquiries_6m;
+    accounts_gap                = total_accounts - active_accounts;
+    enquiry_to_account_ratio    = recent_enquiries_6m / total_accounts;
+    overdue_normalized          = overdue_accounts / (1 + recent_enquiries_6m);
+
+    /* Intentionally Created Duplicates by other team */
+    bureau_score_low_flag       = bureau_score_flag;         /* exact duplicate */
+    enquiry_3plus_flag          = enquiries_flag;            /* exact duplicate */
+    dpd_ratio                   = overdue_to_total_ratio;    /* renamed dup */
+    account_ratio_active        = active_account_ratio;      /* renamed dup */
+    enquiry_below650_flag      = high_enquiry_interaction;  /* logic equivalent */
+run;
+
+data CREDIT.CBS_STAGE2_VARS;
+    set CREDIT.BUREAU_STAGE1_VARS;
+
+ /* Add missing base variables manually for Stage 2 */
+    average_balance          = 60000; /* dummy default for now */
+    minimum_balance          = 8000;
+    salary_credits_3m        = 3;
+    emi_bounce_count         = 0;
+    account_tenure_months    = 24;
+
+    /* Core CBS Derived Variables */
+    emi_to_income_ratio          = emi_amount / monthly_income;
+    avg_balance_flag             = (average_balance < 5000);
+    min_balance_ratio            = minimum_balance / average_balance;
+    low_balance_month_flag       = (min_balance_ratio < 0.2);
+    salary_credit_flag           = (salary_credits_3m >= 2);
+    emi_bounce_flag              = (emi_bounce_count >= 1);
+    tenure_bucket                = floor(account_tenure_months/12);
+    high_balance_flag            = (average_balance >= 100000);
+    emi_high_flag                = (emi_amount > 0.5 * monthly_income);
+    low_income_flag              = (monthly_income < 20000);
+    emi_normalized               = emi_amount / (1 + emi_bounce_count);
+    balance_utilization_score   = average_balance / emi_amount;
+    salary_to_emi_ratio          = monthly_income / emi_amount;
+
+    /* Intentionally Created Duplicates by other department */
+    emi_income_ratio             = emi_to_income_ratio;             /* duplicate */
+    bounce_flag                  = emi_bounce_flag;                 /* duplicate */
+    emi_income_flag              = emi_high_flag;                   /* same logic */
+    high_avg_bal_flag            = high_balance_flag;               /* naming variant */
+    emi_ratio_buffer             = salary_to_emi_ratio;             /* renamed dup */
+run;
+
+data CREDIT.DPD_STAGE3_VARS;
+    set CREDIT.CBS_STAGE2_VARS;
+
+    /* Add dummy DPD values (replace later with real data if needed) */
+    dpd_m1 = 0;
+    dpd_m2 = 30;
+    dpd_m3 = 0;
+    dpd_m4 = 60;
+    dpd_m5 = 0;
+    dpd_m6 = 90;
+
+    dpd_month1 = "JAN";
+    dpd_month2 = "FEB";
+    dpd_month3 = "MAR";
+    dpd_month4 = "APR";
+    dpd_month5 = "MAY";
+    dpd_month6 = "JUN";
+
+    /* Input assumptions */
+    array dpd_arr{6} dpd_m1-dpd_m6;
+    array month_arr{6} $ dpd_month1-dpd_month6;
+    obs_months = dim(dpd_arr);
+
+    /* Core DPD Derived Variables */
+    dpd_max_days      = max(of dpd_m1-dpd_m6);
+    dpd_sum_total     = sum(of dpd_m1-dpd_m6);
+    dpd_avg           = mean(of dpd_m1-dpd_m6);
+    dpd_std_dev       = std(of dpd_m1-dpd_m6);
+
+    /* Count logic */
+    dpd_count_30_plus = 0;
+    dpd_count_60_plus = 0;
+    dpd_count_90_plus = 0;
+
+    do i = 1 to 6;
+        if dpd_arr{i} >= 30 then dpd_count_30_plus + 1;
+        if dpd_arr{i} >= 60 then dpd_count_60_plus + 1;
+        if dpd_arr{i} >= 90 then dpd_count_90_plus + 1;
+    end;
+
+    dpd_30_flag = (dpd_count_30_plus >= 1);
+    dpd_60_flag = (dpd_count_60_plus >= 1);
+    dpd_90_flag = (dpd_count_90_plus >= 1);
+
+    /* Latest and recency */
+    dpd_last_month = dpd_m6;
+    months_since_last_dpd = ifn(dpd_m6 = 0, 1, 0);
+
+    /* Rolling 3-month and trend */
+    dpd_rolling_3_months = sum(of dpd_m4-dpd_m6);
+    dpd_escalation_flag = (dpd_m4 < dpd_m5) and (dpd_m5 < dpd_m6);
+
+    /* Peak month logic */
+    dpd_peak_month = "M1";
+    do i = 1 to 6;
+        if dpd_arr{i} = dpd_max_days then dpd_peak_month = month_arr{i};
+    end;
+
+    /* Duplicate / Renamed Variables */
+    dpd_high_flag       = dpd_90_flag;
+    max_dpd_days        = dpd_max_days;
+    dpd_variance        = dpd_std_dev;
+    dpd_3m_total        = dpd_rolling_3_months;
+    recent_dpd_score    = dpd_last_month;
+run;
+data CREDIT.COLLECTION_STAGE4_VARS;
+    set CREDIT.DPD_STAGE3_VARS;
+
+    /* Stage 4: Collection & Recovery Derived Variables from real columns */
+
+    write_off_case_flag          = (write_off_flag = 1);
+    legal_action_taken_flag      = (legal_case_flag = 1);
+    broken_ptp_flag              = (broken_ptp_flag = 1);
+    ptp_honored_ratio            = ptp_kept_ratio;
+    recovery_effectiveness_score = repayment_to_due_ratio;
+
+    /* Duplicates / Renamed */
+    repayment_rate_flag          = recovery_effectiveness_score;
+    legal_case_escalated_flag    = legal_action_taken_flag;
+    ptp_failure_flag             = broken_ptp_flag;
+    ptp_ratio_score              = ptp_honored_ratio;
+run;
+
+data CREDIT.DISBURSE_STAGE5_VARS;
+    set CREDIT.COLLECTION_STAGE4_VARS;
+
+    /* ------------------------------ */
+    /* Disbursal timing               */
+    /* ------------------------------ */
+    disbursal_gap_days        = intck('day', application_date, account_open_date);
+    disbursal_gap_weeks       = intck('week', application_date, account_open_date);
+    disbursal_gap_category    = ifc(disbursal_gap_days <= 3, "Fast",
+                                ifc(disbursal_gap_days <= 7, "Moderate", "Slow"));
+    quick_disbursal_flag      = (disbursal_gap_days <= 3);
+    very_slow_disbursal_flag  = (disbursal_gap_days > 10);
+
+    /* ------------------------------ */
+    /* Channel analysis               */
+    /* ------------------------------ */
+    digital_channel_flag      = (channel in ("Online", "Mobile"));
+    in_branch_flag            = (channel = "Branch");
+
+    length channel_code $1;  /* Ensure channel_code is defined as character */
+    channel_code              = ifc(channel = "Online", "1",
+                               ifc(channel = "Mobile", "2",
+                               ifc(channel = "Branch", "3", "0")));
+
+    /* ------------------------------ */
+    /* Tenure analytics               */
+    /* ------------------------------ */
+    long_tenure_flag          = (tenure_months > 60);
+    short_term_loan_flag      = (tenure_months <= 12);
+    ultra_short_flag          = (tenure_months <= 6);
+    tenure_bucket             = floor(tenure_months / 12);
+    
+    length tenure_category $10;
+    tenure_category           = ifc(tenure_months <= 12, "Short",
+                                ifc(tenure_months <= 36, "Medium", "Long"));
+
+    /* ------------------------------ */
+    /* Requested amount analysis      */
+    /* ------------------------------ */
+    requested_amt             = requested_amount;
+    requested_bucket          = floor(requested_amt / 50000);
+    high_requested_flag       = (requested_amt > 200000);
+    low_requested_flag        = (requested_amt <= 25000);
+
+    /* ------------------------------ */
+    /* Loan lifecycle status          */
+    /* ------------------------------ */
+    active_tenure_months      = intck('month', account_open_date, today());
+    account_age_bucket        = floor(active_tenure_months / 6);
+    account_fresh_flag        = (active_tenure_months <= 3);
+    account_mature_flag       = (active_tenure_months > 24);
+
+    length loan_cycle_position $6;
+    loan_cycle_position       = ifc(active_tenure_months < (tenure_months / 2), "Early", "Late");
+
+    /* ------------------------------ */
+    /* Duplicate / Renamed Variables */
+    /* ------------------------------ */
+    fast_funding_flag         = quick_disbursal_flag;
+    channel_online_flag       = digital_channel_flag;
+    tenure_category_flag      = long_tenure_flag;
+run;
+data CREDIT.TXN_STAGE6_VARS;
+    set CREDIT.DISBURSE_STAGE5_VARS;
+
+    /* ------------------------------ */
+    /* Credit Utilization Features    */
+    /* ------------------------------ */
+    high_utilization_flag         = (credit_card_utilization_pct >= 80);
+    low_utilization_flag          = (credit_card_utilization_pct <= 20);
+    moderate_utilization_flag     = (credit_card_utilization_pct > 20 and credit_card_utilization_pct < 80);
+
+    utilization_bucket            = floor(credit_card_utilization_pct / 10);
+    utilization_score             = credit_card_utilization_pct / 100;
+
+    /* ------------------------------ */
+    /* Credit Limit Grouping          */
+    /* ------------------------------ */
+    high_credit_limit_flag        = (credit_limit >= 200000);
+    low_credit_limit_flag         = (credit_limit < 25000);
+    credit_limit_bucket           = floor(credit_limit / 50000);
+
+    length credit_segment $10;
+    credit_segment                = ifc(credit_limit < 25000, "Low",
+                                    ifc(credit_limit < 100000, "Mid", "High"));
+
+    /* ------------------------------ */
+    /* Interaction-Based Features     */
+    /* ------------------------------ */
+    utilization_to_limit_ratio    = credit_card_utilization_pct / credit_limit;
+    utilization_weighted_score    = credit_card_utilization_pct * utilization_bucket;
+
+    /* ------------------------------ */
+    /* Duplicates / Renamed           */
+    /* ------------------------------ */
+    util_flag                     = high_utilization_flag;      /* duplicate */
+    utilization_band              = utilization_bucket;         /* duplicate */
+    limit_score_flag              = high_credit_limit_flag;     /* duplicate */
+run;
+data CREDIT.TXN_STAGE7_VARS;
+    set CREDIT.TXN_STAGE6_VARS;
+
+    /* ------------------------------ */
+    /* Loan Size & Tenure Features    */
+    /* ------------------------------ */
+    loan_size_flag              = (requested_amount > 200000);
+    low_loan_flag               = (requested_amount <= 25000);
+    requested_amount_bucket     = floor(requested_amount / 50000);
+    loan_size_score             = requested_amount / monthly_income;
+    short_term_flag             = (tenure_months <= 12);
+    long_term_flag              = (tenure_months > 60);
+    tenure_bucket               = floor(tenure_months / 12);
+    requested_per_tenure        = requested_amount / (tenure_months + 1);
+    loan_burden_ratio           = (requested_amount / tenure_months) / monthly_income;
+
+    /* ------------------------------ */
+    /* Application Timeliness         */
+    /* ------------------------------ */
+    application_month           = month(application_date);
+    application_year            = year(application_date);
+    festive_season_flag         = (application_month in (10, 11, 12));
+    financial_year_start_flag   = (application_month in (4, 5));
+    end_of_year_push_flag       = (application_month = 3);
+
+    /* ------------------------------ */
+    /* Interaction Features           */
+    /* ------------------------------ */
+    tenure_to_income_ratio      = tenure_months / (monthly_income + 1);
+    amount_income_term_score    = requested_amount * tenure_months / (monthly_income + 1);
+    size_bucket_flag            = (requested_amount_bucket >= 4);
+    high_stress_combination     = (loan_burden_ratio > 0.8 and long_term_flag);
+
+    /* ------------------------------ */
+    /* Duplicates / Renamed           */
+    /* ------------------------------ */
+    loan_request_score          = loan_size_score;               /* duplicate */
+    short_loan_flag             = short_term_flag;               /* duplicate */
+    long_loan_flag              = long_term_flag;                /* alias */
+    bucketed_tenure_group       = tenure_bucket;                 /* renamed */
+    disbursal_load_flag         = high_stress_combination;       /* alias */
+    request_term_ratio_flag     = requested_per_tenure;          /* renamed */
+    loan_weighted_score         = amount_income_term_score;      /* duplicate */
+run;
+
+data CREDIT.TXN_STAGE8_VARS;
+    set CREDIT.TXN_STAGE7_VARS;
+
+    /* ------------------------------ */
+    /* Repayment Performance Flags    */
+    /* ------------------------------ */
+    clean_repayment_flag          = (dpd_30_flag = 0);
+    ever_60_plus_flag             = (dpd_60_flag = 1);
+    ever_90_plus_flag             = (dpd_90_flag = 1);
+    recent_dpd_flag               = (dpd_last_month > 0);
+    dpd_escalation_stress_flag    = dpd_escalation_flag;
+
+    /* ------------------------------ */
+    /* Recovery Effectiveness         */
+    /* ------------------------------ */
+    recovery_ratio_flag           = (repayment_to_due_ratio >= 0.8);
+    poor_recovery_flag            = (repayment_to_due_ratio < 0.5);
+    recovery_gap_score            = 1 - repayment_to_due_ratio;
+    effective_recovery_bucket     = floor(repayment_to_due_ratio * 10);
+    recovery_success_flag         = (write_off_flag = 0 and repayment_to_due_ratio >= 0.8);
+
+    /* ------------------------------ */
+    /* PTP Commitment Behavior        */
+    /* ------------------------------ */
+    ptp_broken_flag               = (broken_ptp_flag = 1);
+    ptp_kept_score                = ptp_kept_ratio;
+    ptp_compliance_flag           = (ptp_kept_ratio >= 0.7);
+    ptp_failure_history_flag      = (broken_ptp_flag = 1 and dpd_30_flag = 1);
+
+    /* ------------------------------ */
+    /* Write-Off & Legal Indicators   */
+    /* ------------------------------ */
+    writeoff_flag_combined        = write_off_flag;
+    legal_initiated_flag          = legal_case_flag;
+    legal_escalation_score        = legal_case_flag * dpd_90_flag;
+    writeoff_recovery_flag        = (write_off_flag = 1 and repayment_to_due_ratio >= 0.3);
+
+    /* ------------------------------ */
+    /* Duplicates / Renamed           */
+    /* ------------------------------ */
+    clean_pay_flag                = clean_repayment_flag;             /* duplicate */
+    ptp_repayment_flag            = ptp_compliance_flag;             /* alias */
+    dpd_escalation_flag_alias     = dpd_escalation_stress_flag;      /* renamed */
+    legal_case_escalated_flag     = legal_escalation_score;          /* alias */
+    recovery_bucket_score         = effective_recovery_bucket;       /* renamed */
+    ptp_gap_flag                  = ptp_failure_history_flag;        /* alias */
+    legal_action_flag             = legal_initiated_flag;            /* duplicate */
+run;
+
+data CREDIT.TXN_STAGE9_VARS;
+    set CREDIT.TXN_STAGE8_VARS;
+
+    /* ---------------------------------------------- */
+    /* Simulated Variables – For Testing Purposes     */
+    /* ---------------------------------------------- */
+    internal_behavior_score     = 650 + rannor(1234)*50;    /* Normally distributed around 650 */
+    risk_band_code              = 'M';                      /* Most customers in Medium risk */
+    manual_override_flag        = 0;                        /* Assume no override unless flagged */
+    behavior_stability_index    = 75 + rannor(4321)*10;     /* Slight variance around 75 */
+
+    /* ------------------------------ */
+    /* Bureau Score Buckets & Flags   */
+    /* ------------------------------ */
+    low_bureau_score_flag         = (bureau_score < 600);
+    high_bureau_score_flag        = (bureau_score >= 750);
+    bureau_score_bucket_50        = floor(bureau_score / 50) * 50;
+    bureau_score_bucket_100       = floor(bureau_score / 100) * 100;
+    score_band_segment            = ifc(bureau_score < 600, 'Low',
+                                     ifc(bureau_score < 700, 'Medium', 'High'));
+
+    /* ------------------------------ */
+    /* Behavior Score Interactions    */
+    /* ------------------------------ */
+    behavior_score_gap            = bureau_score - internal_behavior_score;
+    behavior_agreement_flag       = (abs(behavior_score_gap) < 50);
+    high_behavioral_risk_flag     = (internal_behavior_score < 550);
+    behavior_bureau_interaction   = bureau_score * internal_behavior_score;
+    avg_combined_score            = mean(bureau_score, internal_behavior_score);
+
+    /* ------------------------------ */
+    /* Risk Banding & External Flags  */
+    /* ------------------------------ */
+    internal_risk_band_flag       = (risk_band_code in ('H', 'VH'));
+    dual_low_score_flag           = (bureau_score < 600 and internal_behavior_score < 550);
+    risk_segment_score_flag       = (risk_band_code in ('H', 'VH') and bureau_score < 600);
+    external_override_flag        = (manual_override_flag = 1);
+    stable_behavior_flag          = (behavior_stability_index >= 70);
+
+    /* ------------------------------ */
+    /* Duplicates / Renamed           */
+    /* ------------------------------ */
+    risk_band_indicator           = internal_risk_band_flag;
+    behavior_risk_score           = internal_behavior_score;
+    score_agreement_flag          = behavior_agreement_flag;
+    combined_score_flag           = avg_combined_score;
+    override_manual_flag          = external_override_flag;
+    dual_risk_flag                = dual_low_score_flag;
+    score_seg_flag                = risk_segment_score_flag;
+run;
+data CREDIT.TXN_STAGE10_VARS;
+    set CREDIT.TXN_STAGE9_VARS;
+
+    /* Simulate total EMI amount if missing in source */
+    total_emi_amount = 15000 + rannor(2025)*2000;
+
+    /* ---------------------------------------------- */
+    /* Risk Ratios & Final Consolidated Scores        */
+    /* ---------------------------------------------- */
+    score_utilization_ratio     = bureau_score / (1 + credit_card_utilization_pct);
+    limit_to_income_ratio       = credit_limit / (1 + monthly_income);
+    emi_to_income_ratio         = total_emi_amount / (1 + monthly_income);
+    request_to_limit_ratio      = requested_amount / (1 + credit_limit);
+    score_to_tenure_ratio       = bureau_score / (1 + tenure_months);
+
+    /* ---------------------------------------------- */
+    /* Alert Flags – High-Risk Conditions             */
+    /* ---------------------------------------------- */
+    multiple_risk_flags         = sum(high_utilization_flag, low_bureau_score_flag, 
+                                      high_behavioral_risk_flag, dual_low_score_flag);
+
+    high_risk_alert             = (multiple_risk_flags >= 3);
+    critical_pd_trigger         = (ever_90_plus_flag = 1 and behavior_score_gap < -100);
+    low_affordability_flag      = (emi_to_income_ratio > 0.6);
+
+    /* ---------------------------------------------- */
+    /* Final Risk Profile Buckets                     */
+    /* ---------------------------------------------- */
+    risk_profile_score          = mean(avg_combined_score, behavior_stability_index);
+    risk_band_final             = ifc(risk_profile_score >= 750, "Low",
+                                 ifc(risk_profile_score >= 600, "Medium", "High"));
+
+    final_pd_flag               = (high_risk_alert or critical_pd_trigger);
+
+    /* ---------------------------------------------- */
+    /* Duplicates / Alternate Versions                */
+    /* ---------------------------------------------- */
+    alert_flag                  = high_risk_alert;
+    affordability_flag          = low_affordability_flag;
+    risk_bucket                 = risk_band_final;
+run;
+
+
+/* Define the SCORE_BAND format */
+proc format;
+    value score_band
+        low-649 = 'Low'
+        650-699 = 'Medium'
+        700-high = 'High';
+run;
+
+/* Stage 11.1 – Generate 30 Meaningful Derived Variables */
+data CREDIT.TXN_STAGE10_VARS;
+    set CREDIT.TXN_STAGE10_VARS;
+
+    /* ---------- DPD Behaviour Variables ---------- */
+    dpd_max_days   = max(of dpd_m1-dpd_m12);      /* Max DPD observed */
+    dpd_avg        = mean(of dpd_m1-dpd_m12);     /* Avg DPD */
+    dpd_variance   = var(of dpd_m1-dpd_m12);      /* Variance of DPD */
+
+    /* Count of 30+, 60+, 90+ months */
+    dpd_count_30_plus=0; dpd_count_60_plus=0; dpd_count_90_plus=0;
+    array dpd_m[12] dpd_m1-dpd_m12;
+    do i=1 to 12;
+       if dpd_m[i] >= 30 then dpd_count_30_plus + 1;
+       if dpd_m[i] >= 60 then dpd_count_60_plus + 1;
+       if dpd_m[i] >= 90 then dpd_count_90_plus + 1;
+    end;
+
+    /* Last 3 months total DPD */
+    dpd_3m_total = sum(of dpd_m10-dpd_m12);
+
+    /* ---------- EMI & Affordability ---------- */
+    emi_bounce_flag       = (emi_bounce_count >= 1);
+    emi_income_flag       = (emi_amount > 0.5 * monthly_income);
+    emi_ratio_buffer      = monthly_income / emi_amount;
+    limit_to_income_ratio = credit_limit / (1 + monthly_income);
+    low_affordability_flag= (emi_amount / (1 + monthly_income) > 0.6);
+
+    /* ---------- Risk & Alerts ---------- */
+    high_risk_alert    = (dpd_count_60_plus >= 2 or emi_income_flag=1);
+    affordability_flag = (emi_ratio_buffer < 2);
+    critical_pd_trigger= (dpd_max_days >= 120);
+    fast_funding_flag  = (application_date - account_open_date <= 7);
+
+    /* ---------- Salary Credit Behaviour ---------- */
+    salary_credit_regular = (salary_credits_3m >= 3);
+
+    /* ---------- Behavioural Score ---------- */
+    behavioural_score = (bureau_score * 0.7) + ((100 - dpd_avg) * 0.3);
+    risk_score_band   = put(bureau_score,score_band.);
+
+    /* ---------- Account Ratios ---------- */
+    account_ratio_active   = active_accounts / total_accounts;
+    overdue_to_total_ratio = overdue_accounts / total_accounts;
+    active_account_ratio   = active_accounts / total_accounts;
+
+    /* ---------- Enquiry Behaviour ---------- */
+    enquiries_flag           = (recent_enquiries_6m > 2);
+    high_enquiry_interaction = (recent_enquiries_6m >= 4 and bureau_score < 650);
+
+    /* ---------- Loan Flags ---------- */
+    loan_size_flag       = (requested_amount >= 500000);
+    limit_score_flag     = (credit_limit > 3 * monthly_income);
+
+    /* ---------- POS & Mobile Behaviour ---------- */
+    pos_transaction_volume = rand("integer",50,500);
+    mobile_login_frequency = rand("integer",1,30);
+
+    drop i;
+run;
+
+
+/* Stage 11.1 – Generate Final Default Flag */
+
+/* The output table will be CREDIT.TXN_STAGE_FINAL_MODEL */
+/* The base table will be CREDIT.TXN_STAGE10_VARS */
+
+data CREDIT.TXN_STAGE_FINAL_MODEL;
+    set CREDIT.TXN_STAGE10_VARS;
+
+    /* Check for complete observation window */
+    array obs_dpd[12] dpd_m1-dpd_m12;
+    valid_obs = 1;
+    do i=1 to 12;
+        if missing(obs_dpd[i]) then valid_obs = 0;
+    end;
+
+    /* Check for complete performance window */
+    array perf_dpd[6] dpd_f1-dpd_f6;
+    valid_perf = 1;
+    do j=1 to 6;
+        if missing(perf_dpd[j]) then valid_perf = 0;
+    end;
+
+    /* Generate default_flag */
+    if valid_obs and valid_perf then do;
+        if max(of dpd_f1-dpd_f6) >= 90 then default_flag = 1;  /* Defaulter */
+        else default_flag = 0;                                /* Non-defaulter */
+        modeling_population = 1;
+    end;
+    else do;
+        default_flag = .;              /* Not eligible due to incomplete data */
+        modeling_population = 0;
+    end;
+
+    drop i j;
+run;
+
+/* Keep only valid modeling population for final dataset */
+data CREDIT.TXN_STAGE_FINAL_MODEL;
+    set CREDIT.TXN_STAGE_FINAL_MODEL;
+    where modeling_population = 1;
+run;
+proc means data=CREDIT.TXN_STAGE_FINAL_MODEL n nmiss;
+    var _numeric_;
+    output out=NUM_MISS_SUM;
+run;
+data NUM_MISS_PCT;
+    set NUM_MISS;
+    length Variable $32;
+    retain Total;
+    
+    if _N_ = 1 then Total = input(scan(_LABEL_, 2, '='), best.);
+    Variable = _NAME_;
+    Pct_Missing = COL1 / Total * 100;
+    keep Variable Pct_Missing;
+run;
+
+/* Step 4: Print Variables with >30% Missing */
+
+proc print data=NUM_MISS_PCT;
+    where Pct_Missing > 30;
+    title "Variables with >30% Missing";
+run; 
+title "Frequency Distribution – Gender";
+proc freq data= CREDIT.TXN_STAGE_FINAL_MODEL;
+  tables gender / missing nocum nopercent;
+run;
+
+/* Marital Status Category Frequency */
+
+title "Frequency Distribution – Marital Status";
+proc freq data= CREDIT.TXN_STAGE_FINAL_MODEL;
+  tables marital_status / missing nocum nopercent;
+run;
+
+/* Residence Type Category Frequency */
+
+title "Frequency Distribution – Residence Type";
+proc freq data= CREDIT.TXN_STAGE_FINAL_MODEL;
+  tables residence_type / missing nocum nopercent;
+run;
+proc means data= CREDIT.TXN_STAGE_FINAL_MODEL n mean std min max maxdec=2;
+    var bureau_score emi_to_income_ratio monthly_income;
+    title "Descriptive Statistics for Selected Risk Variables";
+run;
+%let cat_vars = gender marital_status residence_type;
+
+%macro freq_check;
+    %do i = 1 %to %sysfunc(countw(&cat_vars));
+        %let var = %scan(&cat_vars, &i);
+        
+        title "Frequency Check for &var (detect misspellings, invalids)";
+        proc freq data= CREDIT.TXN_STAGE_FINAL_MODEL;
+            tables &var / missing nocum nopercent;
+        run;
+    %end;
+%mend;
+
+%freq_check;
+data txn_sample;
+    set credit.txn_stage_final_model(obs=1000);
+run;
+
+/* Step 2: Transpose so that each original column becomes an observation */
+proc transpose data=txn_sample out=txn_transposed name=column_name;
+run;
+
+/* Step 3: Hash the full value set of each column */
+data hashed_columns;
+    set txn_transposed;
+    length digest $32.;
+
+    /* Create hash from all data in the transposed row */
+    digest = md5(cats(of col1-col1000));
+    keep column_name digest;
+run;
+
+/* Step 4: Group by hash value */
+proc sort data=hashed_columns;
+    by digest;
+run;
+
+data duplicate_columns_final;
+    set hashed_columns;
+    by digest;
+    retain group_id 0;
+    if first.digest then group_id + 1;
+run;
+
+/* Step 5: Output list of duplicate groups */
+proc print data=duplicate_columns_final noobs;
+    var group_id column_name;
+    title "Final Duplicate Columns Based on Full Hash Digest";
+run;
+data credit.txn_stage_final_model_cleaned;
+    set credit.txn_stage_final_model;
+
+    drop 
+        repayment_rate_flag
+        recovery_effectiveness_score
+        low_credit_limit_flag
+        low_loan_flag
+        ptp_honored_ratio
+        ptp_ratio_score
+        ptp_kept_score
+        combined_score_flag
+        loan_weighted_score
+        dpd_variance
+        emi_income_flag
+        dpd_avg
+        credit_limit_bucket
+        requested_amount_bucket
+        dpd_max_days
+        dpd_last_month
+        max_dpd_days
+        recent_dpd_score
+        fast_funding_flag
+        account_ratio_active
+        dpd_3m_total
+        affordability_flag
+        dpd_ratio
+        high_credit_limit_flag
+        limit_score_flag
+        loan_size_flag
+        size_bucket_flag
+        enquiry_below650_flag
+        dpd_f2
+        dpd_f3
+        dpd_f4
+        dpd_f5
+        dpd_f6
+
+        credit_limit
+        requested_amt
+        high_risk_band_flag
+        bureau_score_low_flag
+        write_off_case_flag
+        writeoff_flag_combined
+        writeoff_recovery_flag
+        legal_action_taken_flag
+        legal_case_escalated_flag
+        legal_initiated_flag
+        legal_escalation_score
+        legal_action_flag
+        score_agreement_flag
+        dpd_count_30_plus
+        recovery_bucket_score
+        emi_ratio_buffer
+        loan_request_score
+        avg_balance_flag
+        emi_bounce_flag
+        high_balance_flag
+        bounce_flag
+        high_avg_bal_flag
+        dpd_m1
+        dpd_m3
+        dpd_m5
+    ;
+run;
+
+proc sql;
+    create table orphan_txns as
+    select a.*
+    from CREDIT.TXN_STAGE_FINAL_MODEL_CLEANED a
+    left join CREDIT.CUSTOMER_MASTER b
+        on a.cust_id = b.cust_id
+    where b.cust_id is missing;
+quit;
+
+proc contents data=CREDIT.TXN_STAGE_FINAL_MODEL_CLEANED 
+    out=work.metadata_raw(keep=name type length format informat label) 
+    noprint;
+run;
+
+/* Step 2: Add Source info (manually or via macro if multiple sources) */
+data work.metadata_dict;
+    set work.metadata_raw;
+    variable = upcase(name);
+    var_type = ifc(type = 1, 'Numeric', 'Character');
+    source = 'CREDIT.TXN_STAGE_FINAL_MODEL_CLEANED'; /* Update if needed */
+    keep variable var_type length format informat label source;
+run;
+
+data work.pd_model_population;
+    set work.pd_base;
+
+    /* Exclusion rules */
+    if write_off_flag = 1 then delete;
+    if monthly_income <= 0 then delete;
+    if application_date > snapshot_date then delete;
+    if tenure_months < 3 then delete;
+
+    /* Optional: Add more based on flags */
+    /* if fraud_flag = 1 then delete; */
+run;
+6.5  Target Variable
+default_flag is already prepared in the dataset with around 5% default rate
+(default if DPD ≥ 90 in performance window).
+proc freq data=work.pd_model_population;
+    tables default_flag / nocum;
+run;
+6.6  Final Stats Check
+
+proc means data=work.pd_model_population n mean min max;
+    var monthly_income age bureau_score dpd_avg tenure_months;
+run;
+6.7  Output for Modeling
+
+data credit.pd_model_data_final;
+    set work.pd_model_population;
+run;
+data CREDIT.PD_MODEL_DATA_CH9_FEATURES;
+    set CREDIT.PD_MODEL_DATA_FINAL;
+
+    /* Initialize counts */
+    dpd_0to30_freq = 0;
+    dpd_31to60_freq = 0;
+    dpd_61plus_freq = 0;
+
+    array dpd_vars{12} dpd_m1-dpd_m12;
+
+    /* Loop through all 12 months of DPD */
+    do i = 1 to 12;
+        if 1 <= dpd_vars{i} <= 30 then dpd_0to30_freq + 1;
+        else if 31 <= dpd_vars{i} <= 60 then dpd_31to60_freq + 1;
+        else if dpd_vars{i} >= 61 then dpd_61plus_freq + 1;
+    end;
+
+    /* Recent delinquency flag */
+    if max(of dpd_m1-dpd_m3) > 0 then dpd_recent_flag = 1;
+    else dpd_recent_flag = 0;
+
+    /* Worsening DPD flag */
+    if dpd_m1 > dpd_m2 and dpd_m2 > dpd_m3 then dpd_worsening_flag = 1;
+    else dpd_worsening_flag = 0;
+
+    /* Average utilization (last 3 months) */
+    avg_util_3m = mean(of util_m1-util_m3);
+
+    /* EMI to income ratio */
+    emi_to_income_ratio = total_emi / monthly_income;
+
+    /* Loan tenure bucket */
+    if loan_tenure < 12 then loan_tenure_bucket = "Short";
+    else if loan_tenure < 36 then loan_tenure_bucket = "Medium";
+    else loan_tenure_bucket = "Long";
+
+    /* Age band */
+    if age < 25 then age_band = "<25";
+    else if age <= 35 then age_band = "25-35";
+    else if age <= 50 then age_band = "36-50";
+    else age_band = "50+";
+
+    /* Salary credit flag */
+    if sum(of salary_credit_m1-salary_credit_m3) > 0 then salary_credit_flag = 1;
+    else salary_credit_flag = 0;
+
+    /* Bounce count (last 3 months) */
+    bounce_3m_count = sum(of bounce_m1-bounce_m3);
+
+    /* Ratio of DPD to bureau score */
+    dpd_to_bureau_ratio = max(of dpd_m1-dpd_m12) / (900 - bureau_score);
+
+    drop i; /* remove loop index */
+run;
+/* Step 1: Calculate Mean & Median for Imputation */
+proc means data=CREDIT.PD_MODEL_DATA_CH9_FEATURES noprint;
+    var bureau_score total_emi monthly_income;
+    output out=impute_stats
+        mean=bs_mean emi_mean inc_mean
+        median=bs_median emi_median inc_median;
+run;
+
+/* Step 2: Store Median Values in Macro Variables */
+
+data _null_;
+    set impute_stats;
+    call symputx('bs_median', bs_median);
+    call symputx('emi_median', emi_median);
+    call symputx('inc_median', inc_median);
+run;
+
+/* Step 2: Compute 1st and 99th Percentiles for Capping */
+proc univariate data=CREDIT.PD_MODEL_DATA_CH10 noprint;
+    var bureau_score total_emi monthly_income;
+    output out=percentiles
+        p1  = bs_p1 emi_p1 inc_p1
+        p99 = bs_p99 emi_p99 inc_p99;
+run;
+
+/* Step 3: Calculate Percentiles for Outlier Capping */
+proc univariate data=CREDIT.PD_MODEL_DATA_CH9_FEATURES noprint;
+    var bureau_score total_emi monthly_income;
+    output out=percentiles pctlpts=1 99 pctlpre=bs_ emi_ inc_;
+run;
+
+data _null_;
+    set percentiles;
+    call symputx('bs_p1', bs_1);
+    call symputx('bs_p99', bs_99);
+    call symputx('emi_p1', emi_1);
+    call symputx('emi_p99', emi_99);
+    call symputx('inc_p1', inc_1);
+    call symputx('inc_p99', inc_99);
+run;
+
+/* Step 4: Create Final Clean Dataset for Chapter 10 */
+data CREDIT.PD_MODEL_DATA_CH10_CLEAN;
+    set CREDIT.PD_MODEL_DATA_CH9_FEATURES;
+
+/* Missing Flags – Must be before Imputation */
+bureau_score_miss_flag = (missing(bureau_score));
+total_emi_miss_flag = (missing(total_emi));
+monthly_income_miss_flag = (missing(monthly_income));
+
+    /* ---------------- Missing Value Imputation ---------------- */
+    if missing(bureau_score) then bureau_score = &bs_median;
+    if missing(total_emi) then total_emi = &emi_median;
+    if missing(monthly_income) then monthly_income = &inc_median;
+
+    /* ---------------- Create Missing Flags ---------------- */
+    bureau_score_miss_flag = (bureau_score = .);
+    total_emi_miss_flag = (total_emi = .);
+    monthly_income_miss_flag = (monthly_income = .);
+
+    /* ---------------- Outlier Capping ---------------- */
+    if bureau_score < &bs_p1 then bureau_score = &bs_p1;
+    else if bureau_score > &bs_p99 then bureau_score = &bs_p99;
+
+    if total_emi < &emi_p1 then total_emi = &emi_p1;
+    else if total_emi > &emi_p99 then total_emi = &emi_p99;
+
+    if monthly_income < &inc_p1 then monthly_income = &inc_p1;
+    else if monthly_income > &inc_p99 then monthly_income = &inc_p99;
+
+run;
+proc means data=CREDIT.PD_MODEL_DATA_CH10_CLEAN n nmiss mean median min max p25 p50 p75;
+    var bureau_score total_emi monthly_income dpd_max;
+run;
+/* Rank bureau_score into deciles */
+
+proc rank data=CREDIT.PD_MODEL_DATA_CH10_CLEAN groups=10 out=ranked_bureau;
+    var bureau_score;
+    ranks bureau_decile;
+run;
+
+/* Calculate good/bad counts in each decile */
+proc sql;
+    create table iv_bureau as
+    select bureau_decile,
+           sum(default_flag) as bad,
+           count(*)-sum(default_flag) as good
+    from ranked_bureau
+    group by bureau_decile;
+quit;
+
+/* 1 Get list of numeric variables except default_flag */
+proc contents data=CREDIT.PD_MODEL_DATA_CH10_CLEAN out=var_list(keep=name type) noprint;
+run;
+
+proc sql;
+    create table numeric_vars as
+    select name
+    from var_list
+    where type=1 and upcase(name) ne 'DEFAULT_FLAG';
+quit;
+
+/* 2  Create empty IV summary table with correct structure */
+data iv_summary;
+    length variable $50. IV 8.;
+    stop;
+run;
+
+/* 3 Create macro variables for looping */
+data _null_;
+    set numeric_vars end=last;
+    call symputx(cats('var',_n_), name);
+    if last then call symputx('total_vars', _n_);
+run;
+
+%put Total Variables = &total_vars;
+
+/* 4 Loop through all variables */
+%macro calc_woe_iv_all;
+    %do i=1 %to &total_vars;
+        %let var = &&var&i;
+
+        /* Create 10 bins for variable */
+        proc rank data=CREDIT.PD_MODEL_DATA_CH10_CLEAN groups=10 out=ranked;
+            var &var;
+            ranks bin;
+        run;
+
+        /* Good/Bad counts */
+        proc sql;
+            create table stats as
+            select bin,
+                   sum((default_flag=1)) as bad,  /* BAD customers */
+                   sum((default_flag=0)) as good  /* GOOD customers */
+            from ranked
+            group by bin;
+        quit;
+
+        /* Total goods/bads */
+        proc sql noprint;
+            select sum(good), sum(bad) into :tot_good, :tot_bad from stats;
+        quit;
+
+        /* WoE & IV components */
+        data stats_woe;
+            set stats;
+            pct_good = good / &tot_good;
+            pct_bad  = bad / &tot_bad;
+
+            if pct_good=0 then pct_good=0.0001;
+            if pct_bad=0 then pct_bad=0.0001;
+
+            woe = log(pct_good / pct_bad);
+            iv_component = (pct_good - pct_bad) * woe;
+            length variable $50.;
+            variable = "&var";
+        run;
+
+        /* Get IV value */
+        proc sql noprint;
+            select sum(iv_component) into :iv from stats_woe;
+        quit;
+
+        /* Append IV to summary with correct structure */
+        data temp;
+            length variable $50. IV 8.;
+            variable="&var";
+            IV=&iv;
+        run;
+
+        proc append base=iv_summary data=temp force; run;
+
+        /* Append WoE table for all variables */
+        proc append base=woe_all data=stats_woe force; run;
+
+    %end;
+%mend;
+
+%calc_woe_iv_all;
+
+/* 5 Final IV Summary */
+proc print data=iv_summary;
+run;
+proc rank data=CREDIT.PD_MODEL_DATA_CH10_CLEAN groups=10 out=ranked;
+    var bureau_score;
+    ranks bureau_decile;
+run;
+/* STEP 1: Get List of Numeric Variables Except DEFAULT_FLAG */
+proc contents data=CREDIT.PD_MODEL_DATA_CH10_CLEAN 
+    out=var_list(keep=name type) noprint;
+run;
+
+proc sql;
+    create table numeric_vars as
+    select name
+    from var_list
+    where type=1 and upcase(name) ne 'DEFAULT_FLAG';
+quit;
+
+/* STEP 2: Create Empty Base Tables in WORK */
+data iv_summary;
+    length variable $50. IV 8.;
+    stop;
+run;
+
+data woe_all;
+    length variable $50. bin 8. good 8. bad 8. pct_good 8. pct_bad 8. woe 8. iv_component 8.;
+    stop;
+run;
+
+/* STEP 3: Create Macro Variables for Loop */
+data _null_;
+    set numeric_vars end=last;
+    call symputx(cats('var',_n_), name);
+    if last then call symputx('total_vars', _n_);
+run;
+
+/* STEP 4: Auto WoE & IV Calculation for All Variables Except bureau_score */
+%macro calc_auto_woe_iv;
+    %do i=1 %to &total_vars;
+        %let var = &&var&i;
+
+        %if &var ne bureau_score %then %do;
+
+            proc rank data=CREDIT.PD_MODEL_DATA_CH10_CLEAN groups=10 out=ranked;
+                var &var;
+                ranks bin;
+            run;
+
+            proc sql;
+                create table stats as
+                select bin,
+                       sum(default_flag=1) as bad,
+                       sum(default_flag=0) as good
+                from ranked
+                group by bin;
+            quit;
+
+            proc sql noprint;
+                select sum(good), sum(bad) into :tot_good, :tot_bad from stats;
+            quit;
+
+            data stats_woe;
+                length variable $50.;
+                set stats;
+                pct_good = good / &tot_good;
+                pct_bad  = bad / &tot_bad;
+
+                if pct_good=0 then pct_good=0.0001;
+                if pct_bad=0 then pct_bad=0.0001;
+
+                woe = log(pct_good / pct_bad);
+                iv_component = (pct_good - pct_bad) * woe;
+                variable = "&var";
+            run;
+
+            proc sql noprint;
+                select sum(iv_component) into :iv from stats_woe;
+            quit;
+
+            data temp;
+                length variable $50. IV 8.;
+                variable="&var";
+                IV=&iv;
+            run;
+
+            proc append base=iv_summary data=temp force; run;
+            proc append base=woe_all data=stats_woe force; run;
+
+        %end;
+    %end;
+%mend;
+
+%calc_auto_woe_iv;
+
+/* STEP 5: Manual Binning for bureau_score */
+data manual_binned;
+    set CREDIT.PD_MODEL_DATA_CH10_CLEAN;
+    length bin 8.;
+    if bureau_score < 400 then bin=1;
+    else if bureau_score < 500 then bin=2;
+    else if bureau_score < 600 then bin=3;
+    else if bureau_score < 700 then bin=4;
+    else bin=5;
+run;
+
+proc sql;
+    create table manual_stats as
+    select bin,
+           sum(default_flag=1) as bad,
+           sum(default_flag=0) as good
+    from manual_binned
+    group by bin;
+quit;
+
+proc sql noprint;
+    select sum(good), sum(bad) into :tot_good, :tot_bad from manual_stats;
+quit;
+
+data manual_woe;
+    length variable $50.;
+    set manual_stats;
+    pct_good = good / &tot_good;
+    pct_bad  = bad / &tot_bad;
+
+    if pct_good=0 then pct_good=0.0001;
+    if pct_bad=0 then pct_bad=0.0001;
+
+    woe = log(pct_good / pct_bad);
+    iv_component = (pct_good - pct_bad) * woe;
+    variable = "bureau_score";
+run;
+
+/* Append Manual WoE */
+proc append base=woe_all data=manual_woe force; run;
+
+proc sql noprint;
+    select sum(iv_component) into :iv from manual_woe;
+quit;
+
+data temp;
+    length variable $50. IV 8.;
+    variable="bureau_score";
+    IV=&iv;
+run;
+
+proc append base=iv_summary data=temp force; run;
+
+/* STEP 6: Apply WoE to Dataset */
+%macro apply_woe_all;
+    %do i=1 %to &total_vars;
+        %let var = &&var&i;
+
+        proc rank data=CREDIT.PD_MODEL_DATA_CH10_CLEAN groups=10 out=ranked;
+            var &var;
+            ranks bin;
+        run;
+
+        data woe_temp;
+            set woe_all;
+            where variable="&var";
+        run;
+
+        proc sql;
+            create table merged as
+            select a.*, b.woe as &var._woe
+            from ranked a
+            left join woe_temp b
+            on a.bin=b.bin;
+        quit;
+
+        data merged;
+            set merged;
+            if not missing(&var._woe) then do;
+                drop &var bin;
+                rename &var._woe=&var;
+            end;
+        run;
+
+        data CREDIT.PD_MODEL_DATA_CH10_CLEAN;
+            set merged;
+        run;
+
+    %end;
+%mend;
+
+%apply_woe_all;
+
+/* STEP 7: Create Permanent IV Summary Table */
+data CREDIT.PD_IV_SUMMARY;
+    set iv_summary;
+run;
+
+/* Display Final IV Summary */
+proc print data=CREDIT.PD_IV_SUMMARY; run;
+Step 1: Create Expanded Forced Keep List
+------------------------------------------------------------*/
+data keep_list;
+    length variable $50.;
+    input variable $;
+    datalines;
+bureau_score
+bureau_score_bucket
+bureau_score_bucket_50
+bureau_enquiries_1m
+bureau_enquiries_3m
+bureau_enquiries_6m
+bureau_enquiries_12m
+salary_credit_3m
+salary_credit_6m
+salary_credit_12m
+emi_to_income_ratio
+requested_amount
+minimum_balance
+dpd_max
+dpd_count_30_plus
+dpd_count_60_plus
+dpd_sum_total
+last_payment_gap
+num_loans_active
+num_loans_closed
+num_credit_cards_active
+utilization_score
+balance_utilization_score
+credit_card_utilization_pct
+amount_income_term_score
+behavior_bureau_interaction
+age
+employment_type
+education_level
+marital_status
+gender
+city_category
+customer_vintage_months
+avg_monthly_spend
+loan_to_income_ratio
+installment_to_balance_ratio
+cash_txn_ratio
+pos_txn_volume
+risk_score
+credit_limit_usage_ratio
+income_variability_score
+overdue_amount_ratio
+account_open_date
+monthly_income
+monthly_interest_rate
+emi_income_ratio
+emi_normalized
+recovery_success_flag
+request_term_ratio_flag
+;
+run;
+
+/*------------------------------------------------------------
+Step 2: Merge IV Summary with Keep List and Apply Filtering Rules
+------------------------------------------------------------*/
+proc sql;
+    create table iv_filtered as
+    select a.variable, a.iv,
+           case 
+               when b.variable is not null then 1         /* Always keep forced variables */
+               when a.iv >= 0.015 and a.iv <= 5 then 1    /* Relaxed IV cutoff */
+               else 0
+           end as keep_flag
+    from CREDIT.PD_IV_SUMMARY a
+    left join keep_list b
+    on a.variable = b.variable;
+quit;
+
+/*------------------------------------------------------------
+Step 3: Extract All Variables Present in the Dataset
+------------------------------------------------------------*/
+proc contents data=CREDIT.PD_MODEL_DATA_CH10_CLEAN out=var_list(keep=name) noprint;
+run;
+
+/*------------------------------------------------------------
+Step 4: Final Selection – Keep Only Existing Variables
+------------------------------------------------------------*/
+proc sql;
+    create table selected_vars as
+    select variable 
+    from (
+        select variable from iv_filtered where keep_flag = 1
+        union
+        select variable from keep_list
+    ) as combined
+    where variable in (select name from var_list);  /* Keep only variables that exist */
+quit;
+
+/*------------------------------------------------------------
+Step 5: Create Macro Variable for Final Variable List
+------------------------------------------------------------*/
+proc sql noprint;
+    select variable into :selected_list separated by ' '
+    from selected_vars;
+quit;
+
+/*------------------------------------------------------------
+Step 6: Create Final Filtered Dataset
+------------------------------------------------------------*/
+data CREDIT.PD_MODEL_DATA_CH10_FILTERED;
+    set CREDIT.PD_MODEL_DATA_CH10_CLEAN(keep=default_flag &selected_list);
+run;
+
+/*------------------------------------------------------------
+ STEP 1: CORRELATION FILTERING (Output to WORK)
+------------------------------------------------------------*/
+proc corr data=CREDIT.PD_MODEL_DATA_CH10_FILTERED 
+          outp=work.corr_matrix_ch13 noprint;
+    var _numeric_;
+run;
+
+data work.high_corr_pairs_ch13;
+    set work.corr_matrix_ch13;
+    array vars _numeric_;
+    if _TYPE_='CORR' and _NAME_ ne '';
+    do i = 1 to dim(vars);
+        if vars[i] >= 0.90 and _NAME_ < vname(vars[i]) then do;
+            var1 = _NAME_;
+            var2 = vname(vars[i]);
+            corr_value = vars[i];
+            output;
+        end;
+    end;
+    keep var1 var2 corr_value;
+run;
+
+proc sql;
+    create table work.vars_to_drop_ch13 as
+    select a.var2 as variable, a.corr_value, b.iv
+    from work.high_corr_pairs_ch13 a
+    left join CREDIT.PD_IV_SUMMARY b
+    on a.var2 = b.variable
+    where a.corr_value > 0.98
+       or (a.corr_value > 0.95 and b.iv < 0.02);
+quit;
+
+proc sql noprint;
+    select distinct variable into :drop_list separated by ' '
+    from work.vars_to_drop_ch13;
+quit;
+
+data work.corr_filtered_ch13;
+    set CREDIT.PD_MODEL_DATA_CH10_FILTERED;
+    drop &drop_list;
+run;
+/* Create list of independent variables */
+proc contents data=work.corr_filtered_ch13 out=varlist(keep=name type) noprint;
+run;
+
+proc sql noprint;
+    select name into :indep_vars separated by ' '
+    from varlist
+    where type=1 and upcase(name) ne 'DEFAULT_FLAG';
+quit;
+
+/* Run PROC REG once to get VIF */
+ods output ParameterEstimates=estimates;
+proc reg data=work.corr_filtered_ch13;
+    model default_flag = &indep_vars / vif;
+quit;
+ods output close;
+
+/* Identify variables with VIF > 10 (excluding key variables) */
+proc sql noprint;
+    create table work.vars_high_vif_ch13 as
+    select Variable
+    from estimates
+    where VarianceInflation > 10
+      and Variable not in 
+      ('bureau_score','salary_credit_3m','emi_to_income_ratio',
+       'dpd_max','dpd_count_30_plus','utilization_score',
+       'balance_utilization_score','age','employment_type',
+       'education_level','marital_status','risk_score');
+quit;
+
+/* Drop high VIF variables */
+proc sql noprint;
+    select Variable into :drop_vif separated by ' '
+    from work.vars_high_vif_ch13;
+quit;
+
+/* Create FINAL dataset in WORK */
+data work.vif_filtered_final_ch13;
+    set work.corr_filtered_ch13;
+    drop &drop_vif;
+run;
+data CREDIT.VIF_FILTERED_FINAL_CH13;   /* <-- NEW NAME */
+    set work.vif_filtered_final_ch13;
+run;
+
+/* Create final variable list */
+proc contents data=CREDIT.VIF_FILTERED_FINAL_CH13 
+              out=CREDIT.FINAL_VARS_CH13(keep=name type) noprint;
+run;
+
+proc sql;
+    create table CREDIT.FINAL_VARS_SELECTED_CH13 as
+    select name
+    from CREDIT.FINAL_VARS_CH13
+    where type=1 and upcase(name) ne 'DEFAULT_FLAG';
+quit;
+
+/* Step 1: Create Keep List ONLY for variables present in the dataset */
+proc sql;
+    create table work.final_keep_list_ch13 as
+    select name as variable
+    from varlist
+    where name in (
+        "account_open_date","account_tenure_months","age","amount_income_term_score",
+        "annual_interest_rate","application_date","avg_combined_score",
+        "balance_utilization_score","behavior_score_gap","bureau_score",
+        "credit_card_utilization_pct","default_flag","dpd_count_30_plus",
+        "dpd_max","dpd_recent_flag","emi_to_income_ratio","employment_type",
+        "loan_size_score","overdue_normalized","pos_transaction_volume",
+        "recovery_success_flag","risk_score","tenure_months"
+    );
+quit;
+
+/* Step 2: Create Macro Variable */
+proc sql noprint;
+    select variable into :final_vars separated by ' '
+    from work.final_keep_list_ch13;
+quit;
+
+/* Step 3: Create Final Dataset */
+data CREDIT.PD_MODEL_DATA_CH13_FINAL_25;
+    set CREDIT.VIF_FILTERED_FINAL_CH13(keep=&final_vars);
+run;
+
+/* Step 4: Metadata */
+proc contents data=CREDIT.PD_MODEL_DATA_CH13_FINAL_25
+              out=CREDIT.FINAL_25_METADATA_CH13 noprint;
+run;
+proc stdize data=CREDIT.PD_MODEL_DATA_CH13_FINAL_25 out=model_data_prep method=std;
+    var dpd_max;
+run;
+
+data model_data_prep;
+    set model_data_prep;
+
+    /* Remove problematic variables */
+    drop emi_to_income_ratio dpd_count_30_plus;
+
+    /* Adjust dpd_max to avoid quasi-separation */
+    dpd_max_adj = dpd_max + (ranuni(12345) * 0.01);
+run;
+
+/* 2.Train/Validation Split */
+proc surveyselect data=model_data_prep out=model_data samprate=0.7 outall seed=12345;
+run;
+
+data train valid;
+    set model_data;
+    if selected=1 then output train;
+    else output valid;
+run;
+
+/* 3 Stepwise Logistic Regression */
+proc logistic data=train outmodel=log_model_stepwise;
+    class employment_type (param=ref ref='Salaried');
+    model default_flag(event='1') =
+          dpd_max_adj
+          amount_income_term_score
+          annual_interest_rate
+          dpd_recent_flag
+          overdue_normalized
+          pos_transaction_volume
+          recovery_success_flag
+          risk_score
+          bureau_score
+          age
+          balance_utilization_score
+          behavior_score_gap
+          credit_card_utilization_pct
+          loan_size_score
+          avg_combined_score
+          application_date
+          account_tenure_months
+          account_open_date
+          / selection=stepwise slentry=0.05 slstay=0.05;
+    ods output SelectionSummary=step_summary;
+run;
+
+/* 4 Re-run Final Model with Forced Business Variables */
+proc logistic data=train outmodel=log_model_final;
+    class employment_type (param=ref ref='Salaried');
+    model default_flag(event='1') =
+          amount_income_term_score
+          annual_interest_rate
+          pos_transaction_volume
+          recovery_success_flag
+          /* Force-keep critical variables */
+          dpd_max_adj
+          risk_score
+          overdue_normalized
+          dpd_recent_flag
+          / selection=none;
+    score data=valid out=valid_scored priorevent=0.07 outroc=roc_valid;
+    score data=train out=train_scored priorevent=0.07 outroc=roc_train;
+run;
+
+/* 5 Create Deciles – Train */
+proc rank data=train_scored groups=10 out=train_deciles;
+    var P_1;
+    ranks decile;
+run;
+
+/* 6 Create Deciles – Validation */
+proc rank data=valid_scored groups=10 out=valid_deciles;
+    var P_1;
+    ranks decile;
+run;
+
+/* 7 Performance Summary – Train */
+proc sql;
+    create table train_perf as
+    select decile,
+           count(*) as total_obs,
+           sum(default_flag) as defaults,
+           mean(P_1) as avg_pred_prob
+    from train_deciles
+    group by decile
+    order by decile;
+quit;
+
+/* 8 Performance Summary – Validation */
+proc sql;
+    create table valid_perf as
+    select decile,
+           count(*) as total_obs,
+           sum(default_flag) as defaults,
+           mean(P_1) as avg_pred_prob
+    from valid_deciles
+    group by decile
+    order by decile;
+quit;
+
+/* Print Performance Tables */
+title "Model Performance – Training Data (Decile Summary)";
+proc print data=train_perf; run;
+
+title "Model Performance – Validation Data (Decile Summary)";
+proc print data=valid_perf; run;
+
+/* 1ROC Stats */
+title "ROC Stats – Training Data";
+proc print data=roc_train; run;
+
+title " ROC Stats – Validation Data";
+proc print data=roc_valid; run;
+
+/* Create Deciles for Train */
+proc rank data=train_scored groups=10 out=train_deciles;
+    var P_1; /* Predicted probability of default */
+    ranks decile;
+run;
+
+/* Create Deciles for Validation */
+proc rank data=valid_scored groups=10 out=valid_deciles;
+    var P_1;
+    ranks decile;
+run;
+
+/* Performance Summary – Train */
+proc sql;
+    create table train_perf as
+    select decile,
+           count(*) as total_obs,
+           sum(default_flag) as defaults,
+           mean(P_1) as avg_pred_prob
+    from train_deciles
+    group by decile
+    order by decile;
+quit;
+
+/* Performance Summary – Validation */
+proc sql;
+    create table valid_perf as
+    select decile,
+           count(*) as total_obs,
+           sum(default_flag) as defaults,
+           mean(P_1) as avg_pred_prob
+    from valid_deciles
+    group by decile
+    order by decile;
+quit;
+
+/* Print Results */
+title "Model Performance – Training Decile Summary";
+proc print data=train_perf; run;
+
+title "Model Performance – Validation Decile Summary";
+proc print data=valid_perf; run;
+Step 3 – ROC Curve Statistics
+
+title "ROC Curve Stats – Training Data";
+proc print data=roc_train; run;
+
+title "ROC Curve Stats – Validation Data";
+proc print data=roc_valid; run;
+This output includes AUC (c-statistic) and KS-related info.
+Step 4 – KS Statistic
+
+/* KS Statistic for Training */
+proc npar1way data=train_scored edf;
+    class default_flag;
+    var P_1;
+run;
+
+/* KS Statistic for Validation */
+proc npar1way data=valid_scored edf;
+    class default_flag;
+    var P_1;
+run;
+ods output ROCAssociation=roc_assoc;
+proc logistic data=train outmodel=log_model;
+    model default_flag(event='1') =
+        dpd_max_adj
+        amount_income_term_score
+        annual_interest_rate
+        dpd_recent_flag
+        overdue_normalized
+        pos_transaction_volume
+        recovery_success_flag
+        risk_score
+        account_tenure_months
+        account_open_date;
+run;
+
+/* 2 Calculate Gini from AUC */
+data gini_calc;
+    set roc_assoc;
+    if Label2 = "c" then Gini = 2*nValue2 - 1; /* AUC → Gini */
+run;
+
+proc print data=gini_calc; run;
+proc sql;
+    create table lift_calc as
+    select decile,
+           sum(default_flag) as defaults,
+           count(*) as total_obs,
+           calculated defaults / calculated total_obs as default_rate,
+           (select mean(default_flag) from train_scored) as avg_default_rate
+    from train_deciles
+    group by decile
+    order by decile;
+quit;
+
+/* Add Lift Column */
+data lift_calc;
+    set lift_calc;
+    lift = default_rate / avg_default_rate;
+run;
+
+proc print data=lift_calc; run;
+proc sql;
+    create table psi as
+    select a.decile,
+           a.total_obs/sum(a.total_obs) as exp_pct,
+           b.total_obs/sum(b.total_obs) as act_pct,
+           (calculated act_pct - calculated exp_pct) *
+           log((calculated act_pct) / (calculated exp_pct)) as psi
+    from train_perf a
+    inner join valid_perf b
+    on a.decile = b.decile;
+quit;
+
+proc sql;
+    select sum(psi) as PSI from psi;
+quit;
+proc hpsplit data=train seed=12345;
+    class default_flag;
+    model default_flag(event='1') = 
+        dpd_max_adj amount_income_term_score annual_interest_rate
+        dpd_recent_flag overdue_normalized pos_transaction_volume
+        recovery_success_flag risk_score account_tenure_months account_open_date;
+    grow entropy;
+    prune costcomplexity;
+    partition fraction(validate=0.3);
+    code file="tree_score.sas";
+run;
+/* Step 1: Combine approved and rejected applicants */
+data all_applicants;
+   set approved rejected;
+   if approved_flag=1 then status=default_flag;
+run;
+
+/* Step 2: Create score bands */
+proc rank data=all_applicants groups=5 out=banded;
+   var bureau_score;
+   ranks score_band;
+run;
+
+/* Step 3: Calculate default rate by band (using approved only) */
+proc means data=banded noprint;
+   where approved_flag=1;
+   class score_band;
+   var status;
+   output out=band_defaults mean=default_rate;
+run;
+
+/* Step 4: Merge default rates to rejected applicants */
+proc sql;
+   create table rejected_inferred as
+   select a.*, b.default_rate
+   from banded as a
+   left join band_defaults as b
+   on a.score_band=b.score_band
+   where a.approved_flag=0;
+quit;
+
+proc logistic data=credit.accepted descending;
+   class employment_type(ref="SALARIED");
+   model default_flag = bureau_score emi_to_income utilization_rate num_enquiries_3m;
+   output out=work.accepted_scored p=pred_default;
+run;
+
+/* Step 2 – Score Rejected Applicants */
+proc logistic inmodel=work.accepted_scored;
+   score data=credit.rejected out=work.rejected_scored priorevent=0.08;
+run;
+
+/* Step 3 – Assign Rejects into Virtual Good/Bad based on Score */
+data work.rejected_inferred;
+   set work.rejected_scored;
+   if pred_default >= 0.25 then inferred_flag=1;  /* virtual bad */
+   else inferred_flag=0;                          /* virtual good */
+run;
+
+/* Step 4 – Combine Accepted + Inferred Rejects for Re-Estimation */
+data credit.reject_inference_model;
+   set work.accepted work.rejected_inferred;
+run;
+
+proc logistic data=credit.reject_inference_model descending;
+   model default_flag(inferred_flag)= bureau_score emi_to_income utilization_rate num_enquiries_3m;
+run;
+1 Remove unwanted variables
+----------------------------------------------------------*/
+data credit.pdmodel_clean;
+    set credit.PD_MODEL_DATA_CH13_FINAL_25;
+    drop emi_to_income_ratio other_unwanted_var;
+run;
+
+/*----------------------------------------------------------
+2 Standardize dpd_max (mean=0, std=1)
+----------------------------------------------------------*/
+proc stdize data=credit.pdmodel_clean
+            out=credit.pdmodel_stdz
+            method=std;
+    var dpd_max;
+run;
+
+/* Rename standardized dpd_max to dpd_max_adj */
+data credit.pdmodel_stdz;
+    set credit.pdmodel_stdz (rename=(dpd_max=dpd_max_adj));
+run;
+
+/*----------------------------------------------------------
+3 Fit Logistic Model and Save Scoring Code
+----------------------------------------------------------*/
+proc logistic data=credit.pdmodel_stdz outmodel=credit.log_model_final;
+    model default_flag(event='1') =
+        dpd_max_adj risk_score account_tenure_months account_open_date;
+    score data=credit.pdmodel_stdz out=credit.pdmodel_scored;
+run;
+
+/*----------------------------------------------------------
+4 Define PDO, Base Score, and Base Odds
+----------------------------------------------------------*/
+%let pdo = 20;          /* Points to Double the Odds */
+%let base_score = 600;  /* Base Score (Common in real-world scorecards) */
+%let base_odds = 20;    /* Base Odds */
+
+%let factor = %sysevalf(&pdo / %sysfunc(log(2)));
+%let offset = %sysevalf(&base_score - &factor * %sysfunc(log(&base_odds)));
+
+/*----------------------------------------------------------
+5 Final Scoring (Higher PD → Lower Score)
+----------------------------------------------------------*/
+data credit.pdmodel_scoring;
+    set credit.pdmodel_scored;
+
+    /* Correct odds formula */
+    odds = (1-P_1) / P_1;
+
+    /* Final score */
+    score = &offset + &factor * log(odds);
+
+    /* More readable probability */
+    P_1_readable = round(P_1, 0.0000001);
+    format P_1_readable 12.7;
+run;
+
+/* Sort by score in descending order (higher score = lower PD) */
+proc sort data=credit.pdmodel_scoring out=scored_sorted;
+    by descending score;
+run;
+
+/* Create deciles based on score */
+proc rank data=scored_sorted groups=10 out=scored_deciles;
+    var score;
+    ranks score_decile;
+run;
+
+/* Calculate bad rate per decile */
+proc sql;
+    create table bad_rate_decile as
+    select score_decile+1 as decile,
+           count(*) as total_obs,
+           sum(default_flag) as bads,
+           calculated bads/count(*) as bad_rate format=percent8.2,
+           min(score) as min_score,
+           max(score) as max_score
+    from scored_deciles
+    group by score_decile
+    order by decile;
+quit;
+
+proc print data=bad_rate_decile; run;
+2. Create Risk Buckets (Very High → Very Low Risk)
+
+/* Define risk bands based on score ranges */
+data credit.pdmodel_riskband;
+    set credit.pdmodel_scoring;
+
+    length risk_band $20;
+
+    if score < 400 then risk_band = "Very High Risk";
+    else if 400 <= score < 500 then risk_band = "High Risk";
+    else if 500 <= score < 600 then risk_band = "Medium Risk";
+    else if 600 <= score < 700 then risk_band = "Low Risk";
+    else risk_band = "Very Low Risk";
+run;
+
+/* Calculate summary stats per risk band */
+proc sql;
+    create table riskband_summary as
+    select risk_band,
+           count(*) as total_obs,
+           sum(default_flag) as bads,
+           calculated bads/count(*) as bad_rate format=percent8.2,
+           min(score) as min_score,
+           max(score) as max_score
+    from credit.pdmodel_riskband
+    group by risk_band
+    order by bad_rate desc;
+quit;
+
+proc print data=riskband_summary; run;
+ 3. Action Mapping per Risk Band
+data riskband_actions;
+    set riskband_summary;
+
+    length recommended_action $50;
+
+    if risk_band = "Very High Risk" then recommended_action = "Reject / Collections Focus";
+    else if risk_band = "High Risk" then recommended_action = "Tight Monitoring / Low Credit Limit";
+    else if risk_band = "Medium Risk" then recommended_action = "Normal Approval / Standard Limit";
+    else if risk_band = "Low Risk" then recommended_action = "Pre-approved Offers / High Credit Limit";
+    else if risk_band = "Very Low Risk" then recommended_action = "Premium Offers / Higher Loan Amounts";
+run;
+
+proc print data=riskband_actions; run;
+data credit.prod_scoring_input;
+    set credit.new_applications;
+
+    /* Derived variables required for final model */
+    account_tenure_months = intck('month', account_open_date, today());
+    emi_to_income_ratio = emi_amount / monthly_income;
+    dpd_max = max(of dpd_m1-dpd_m12);
+run;
+
+2.	Apply Binning Logic
+
+data credit.prod_binning;
+    set credit.prod_scoring_input;
+
+    /* Binning for dpd_max */
+    if dpd_max = 0 then dpd_max_bin = 1;
+    else if 1 <= dpd_max <= 2 then dpd_max_bin = 2;
+    else if dpd_max >= 3 then dpd_max_bin = 3;
+
+    /* Binning for emi_to_income_ratio */
+    if emi_to_income_ratio < 0.3 then emi_inc_bin = 1;
+    else if emi_to_income_ratio < 0.6 then emi_inc_bin = 2;
+    else emi_inc_bin = 3;
+run;
+
+3 Apply WOE Mapping
+
+data credit.prod_woe;
+    set credit.prod_binning;
+
+    /* WOE mapping (must match development values) */
+    if dpd_max_bin=1 then dpd_max_woe=-0.75;
+    else if dpd_max_bin=2 then dpd_max_woe=0.20;
+    else if dpd_max_bin=3 then dpd_max_woe=0.90;
+
+    if emi_inc_bin=1 then emi_inc_woe=-0.35;
+    else if emi_inc_bin=2 then emi_inc_woe=0.15;
+    else emi_inc_woe=0.65;
+run;
+4. Apply Final Logistic Regression Formula
+
+data credit.prod_scoring;
+    set credit.prod_woe;
+
+    /* Final logistic formula with approved coefficients */
+    logit = -2.80
+            + (-1.20 * dpd_max_woe)
+            + (0.90  * risk_score)
+            + (0.50  * emi_inc_woe)
+            + (-0.60 * account_tenure_months);
+
+    pd = exp(logit) / (1 + exp(logit));
+run;
+5. Score Scaling (PDO, Base Score, Offset)
+
+%let pdo = 20;
+%let base_score = 800;
+%let base_odds = 20;
+
+%let factor = %sysevalf(&pdo / %sysfunc(log(2)));
+%let offset = %sysevalf(&base_score - &factor * %sysfunc(log(&base_odds)));
+
+data credit.prod_scoring_final;
+    set credit.prod_scoring;
+
+    odds = (1-pd)/pd;
+    score = &offset + &factor * log(odds);
+
+    /* Add timestamp & version for audit trail */
+    score_timestamp = datetime();
+    model_version = "PD_Model_v1.0";
+    format score_timestamp datetime20.;
+run;
+6. Final Output Table
+proc print data=credit.prod_scoring_final (obs=10);
+    var customer_id pd score score_timestamp model_version;
+run;
+1 Train Final Model & Save Coefficients
+proc stdize data=CREDIT.PD_MODEL_DATA_CH13_FINAL_25 out=model_data_prep method=std;
+    var dpd_max;
+run;
+
+data model_data_prep;
+    set model_data_prep;
+    drop emi_to_income_ratio dpd_count_30_plus;
+    dpd_max_adj = dpd_max + (ranuni(12345) * 0.01);
+run;
+
+proc logistic data=model_data_prep outmodel=credit.model_final_coef;
+    class employment_type (param=ref ref='Salaried');
+    model default_flag(event='1') =
+          amount_income_term_score
+          annual_interest_rate
+          pos_transaction_volume
+          recovery_success_flag
+          dpd_max_adj
+          risk_score
+          overdue_normalized
+          dpd_recent_flag
+          / selection=none;
+run;
+2 Score Development Data
+
+proc logistic inmodel=credit.model_final_coef;
+    score data=model_data_prep out=train_scored priorevent=0.07;
+run;
+3 Score Performance Data (Stable Scenario)
+proc stdize data=CREDIT.PD_MODEL_DATA_CH13_FINAL_25_PERF out=perf_prep method=std;
+    var dpd_max;
+run;
+
+data perf_prep;
+    set perf_prep;
+    drop emi_to_income_ratio dpd_count_30_plus;
+    dpd_max_adj = dpd_max + (ranuni(12345) * 0.01);
+run;
+
+proc logistic inmodel=credit.model_final_coef;
+    score data=perf_prep out=perf_scored priorevent=0.07;
+run;
+4 Create Score Bands (Deciles)
+proc rank data=train_scored groups=10 out=train_scored_ranked;
+    var P_1;
+    ranks score_band;
+run;
+
+proc rank data=perf_scored groups=10 out=perf_scored_ranked;
+    var P_1;
+    ranks score_band;
+run;
+5 Calculate Bad Rate & PSI
+proc sql;
+    create table train_summary as
+    select score_band,
+           count(*) as total_obs,
+           sum(default_flag) as defaults,
+           mean(P_1) as avg_pd
+    from train_scored_ranked
+    group by score_band
+    order by score_band;
+
+    create table perf_summary as
+    select score_band,
+           count(*) as total_obs,
+           mean(P_1) as avg_pd
+    from perf_scored_ranked
+    group by score_band
+    order by score_band;
+quit;
+
+proc sql;
+    create table psi_calc as
+    select a.score_band,
+           a.total_obs/sum(a.total_obs) as pct_dev,
+           b.total_obs/sum(b.total_obs) as pct_perf,
+           (calculated pct_perf - calculated pct_dev) *
+           log(calculated pct_perf / calculated pct_dev) as psi_value
+    from train_summary a
+    join perf_summary b
+    on a.score_band = b.score_band;
+quit;
+
+proc sql;
+    select sum(psi_value) as total_psi from psi_calc;
+quit;
+
+/* --- Numeric profile (tidy) --- */
+proc means data=work.model_data_prep
+           n nmiss mean std min p1 p5 p50 p95 p99 max
+           stackodsoutput;
+  var _numeric_;
+  ods output Summary=num_profile;
+run;
+
+/* Keep neat columns & missing% */
+data num_profile;
+  set num_profile;                 /* has Variable, N, NMiss, Mean, StdDev, etc. */
+  length variable $32;
+  variable   = Variable;
+  missing_pct = NMiss / (N + NMiss);
+  keep variable N NMiss missing_pct Mean StdDev Min P1 P5 P50 P95 P99 Max;
+  format missing_pct percent8.2;
+run;
+
+proc sort data=num_profile; by descending missing_pct; run;
+
+proc sql;
+  create table train_dec as
+  select score_band,
+         count(*) as n,
+         sum(default_flag) as bads,
+         mean(default_flag) as bad_rate
+  from work.train_scored_ranked
+  group by score_band
+  order by score_band desc;
+quit;
+
+data train_dec2; set train_dec end=last;
+  retain cum_bads cum_goods tot_bads tot_goods 0;
+  if _n_=1 then do;
+    call symputx('TB',sum(bads)); call symputx('TG',sum(n)-sum(bads));
+  end;
+  cum_bads + bads; cum_goods + (n-bads);
+  cb = cum_bads / &TB; cg = cum_goods / &TG; ks = abs(cb-cg);
+  if last then call symputx('KS_TRAIN',max(ks));
+run;
